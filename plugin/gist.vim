@@ -1,7 +1,7 @@
 "=============================================================================
 " File: gist.vim
 " Author: Yasuhiro Matsumoto <mattn.jp@gmail.com>
-" Last Change: 29-Jul-2010.
+" Last Change: 18-Oct-2010.
 " Version: 3.8
 " WebPage: http://github.com/mattn/gist-vim
 " License: BSD
@@ -93,7 +93,7 @@
 " script type: plugin
 
 if &cp || (exists('g:loaded_gist_vim') && g:loaded_gist_vim)
-  finish
+  "finish
 endif
 let g:loaded_gist_vim = 1
 
@@ -167,6 +167,8 @@ endfunction
 function! s:GistList(user, token, gistls, page)
   if a:gistls == '-all'
     let url = 'http://gist.github.com/gists'
+  elseif g:gist_show_privates
+    let url = 'http://gist.github.com/mine'
   else
     let url = 'http://gist.github.com/'.a:gistls
   endif
@@ -193,15 +195,10 @@ function! s:GistList(user, token, gistls, page)
       echo 'Canceled'
       return
     endif
-    echon "Login to gist... "
-    let cookie = s:GistGetSessionID(a:user, password)
-    if len(cookie) == 0
-      echo 'Failed'
-      return
-    endif
+    let res = s:GistGetPage(url, a:user, password)
+    let g:hoge = res
     silent %d _
-    let quote = &shellxquote == '"' ?  "'" : '"'
-    exec 'silent r! curl -i -b '.quote.substitute(cookie,'%','\\%','g').quote.' '.url
+    put =res
   else
     silent %d _
     exec 'silent r! curl -s '.url
@@ -381,33 +378,80 @@ function! s:GistUpdate(user, token, content, gistid, gistnm)
   return res
 endfunction
 
-function! s:GistGetSessionID(user, password)
+function! s:GistGetPage(url, user, password)
+  let res = system('curl -s -i https://gist.github.com/login')
+  let cookies = filter(split(res, '\(\r\?\n\|\r\n\?\)'), 'v:val =~ "^Set-Cookie:"')
+  let cookies = map(cookies, 'substitute(v:val[12:], ";.*", "", "")')
+  let csrf_ids = filter(deepcopy(cookies), 'v:val =~ "^csrf_id"')
+  let csrf_id = substitute(csrf_ids[0], '^csrf_id=\(\w\+\).*', '\1', '')
+  echo csrf_id
+  let token = substitute(res, '^.* name="authenticity_token" type="hidden" value="\([^"]\+\)".*$', '\1', '')
+  echo token
+
   let query = [
+    \ 'authenticity_token=%s',
+    \ 'csrf_id=%s',
     \ 'login=%s',
     \ 'password=%s',
+    \ 'return_to=%s',
+    \ 'commit=%s',
     \ ]
   let squery = printf(join(query, '&'),
+    \ s:encodeURIComponent(csrf_id),
+    \ s:encodeURIComponent(csrf_id),
     \ s:encodeURIComponent(a:user),
-    \ s:encodeURIComponent(a:password))
+    \ s:encodeURIComponent(a:password),
+    \ s:encodeURIComponent(a:url),
+    \ s:encodeURIComponent('Log in'))
   unlet query
 
   let file = tempname()
-  exec 'redir! > '.file
-  silent echo squery
-  redir END
+  call writefile([squery], file)
   let quote = &shellxquote == '"' ?  "'" : '"'
-  let url = 'https://gist.github.com/session'
-  let res = system('curl -i -d @'.quote.file.quote.' '.url)
+  let command = 'curl -s -L'
+  for cookie in cookies
+    let command .= ' -b '.quote.cookie.quote
+  endfor
+  let command .= ' -d @'.quote.file.quote.' https://gist.github.com/session'
+  echo command
+  let res = system(command)
   call delete(file)
-  let loc = matchstr(split(res, '\(\r\?\n\|\r\n\?\)'), '^Location: ')
-  let loc = substitute(res, '^.*: ', '', '')
-  if len(loc)
-    let res = matchstr(split(res, '\(\r\?\n\|\r\n\?\)'), '^Set-Cookie: ')
-    let res = substitute(res, '^.*: \([^;]\+\).*$', '\1', '')
-  else
-    let res = ''
-  endif
   return res
+endfunction
+
+function! s:GistGetSessionID(user, password)
+  let res = system('curl -i https://gist.github.com/login')
+  let cookies = filter(split(res, '\(\r\?\n\|\r\n\?\)'), 'v:val =~ "^Set-Cookie:"')
+  let cookies = map(cookies, 'v:val[12:]')
+  let csrf_id = filter(cookies, 'v:val =~ "^csrf_id"')
+  let token = substitute(csrf_id[0], 'csrf_id=\([^;]\+\).*', '\1', '')
+
+  let query = [
+    \ 'authenticity_token=%s',
+    \ 'login=%s',
+    \ 'password=%s',
+    \ 'return_to=%s',
+    \ ]
+  let squery = printf(join(query, '&'),
+    \ token,
+    \ s:encodeURIComponent(a:user),
+    \ s:encodeURIComponent(a:password),
+    \ s:encodeURIComponent('/mine'))
+  unlet query
+
+  let file = tempname()
+  call writefile([squery], file)
+  let quote = &shellxquote == '"' ?  "'" : '"'
+  let command = 'curl -L -i'
+  for cookie in cookies
+    let command .= ' -b '.quote.cookie.quote
+  endfor
+  let command .= ' -d @'.quote.file.quote.' https://gist.github.com/session'
+  let res = system(command)
+  call delete(file)
+  let cookies = filter(split(res, '\(\r\?\n\|\r\n\?\)'), 'v:val =~ "^Set-Cookie:"')
+  let cookies = map(cookies, 'v:val[12:]')
+  return [cookies, token]
 endfunction
 
 function! s:GistDelete(user, token, gistid)
@@ -417,15 +461,40 @@ function! s:GistDelete(user, token, gistid)
     return
   endif
   echon "Login to gist... "
-  let cookie = s:GistGetSessionID(a:user, password)
-  if len(cookie) == 0
+  let [cookies, auth_token] = s:GistGetSessionID(a:user, password)
+  if len(auth_token) == 0
     echo 'Failed'
     return
   endif
+
+"  echon " Getting authenticity_token... "
+"  let quote = &shellxquote == '"' ?  "'" : '"'
+"  let url = 'http://gist.github.com/'.a:gistid
+"  let command = 'curl -i'
+"  for cookie in cookies
+"    let command .= ' -b '.quote.cookie.quote
+"  endfor
+"  let command .= ' '.quote.url.quote
+"  echo command
+"  let res = system(command)
+  "let cookies = filter(split(res, '\(\r\?\n\|\r\n\?\)'), 'v:val =~ "^Set-Cookie:"')
+  "let cookies = map(cookies, 'v:val[12:]')
+  "let csrf_id = filter(cookies, 'v:val =~ "^csrf_id"')
+  "let auth_token = substitute(csrf_id[0], 'csrf_id=\([^;]\+\).*', '\1', '')
+  "let mx = '^.* name="authenticity_token" type="hidden" value="\([^"]\+\)".*$'
+  "let auth_token = substitute(matchstr(res, mx), mx, '\1', '')
+  echo auth_token
+
   echon " Deleting gist... "
   let quote = &shellxquote == '"' ?  "'" : '"'
   let url = 'http://gist.github.com/delete/'.a:gistid
-  let res = system('curl -i -b '.quote.substitute(cookie,'%','\\%','g').quote.' '.url)
+  let command = 'curl -i'
+  for cookie in cookies
+    let command .= ' -b '.quote.cookie.quote
+  endfor
+  let command .= ' -H '.quote.'X-HTTP-Method-Override: DELETE'.quote.' -X POST -d '.quote.'authenticity_token='.auth_token.'&_method=delete'.quote.' '.quote.url.quote
+  echo command
+  let res = system(command)
   let res = matchstr(split(res, '\(\r\?\n\|\r\n\?\)'), '^Location: ')
   let res = substitute(res, '^.*: ', '', '')
   if len(res) > 0 && res != 'http://gist.github.com/gists'
@@ -509,13 +578,10 @@ function! s:GistPost(user, token, content, private)
   unlet query
 
   let file = tempname()
-  exec 'redir! > '.file
-  silent echo squery
-  redir END
+  call writefile([squery], file)
   echon " Posting it to gist... "
   let quote = &shellxquote == '"' ?  "'" : '"'
-  let url = 'http://gist.github.com/gists'
-  let res = system('curl -i -d @'.quote.file.quote.' '.url)
+  let res = system('curl -i -d @'.quote.file.quote.' http://gist.github.com/gists')
   call delete(file)
   let res = matchstr(split(res, '\(\r\?\n\|\r\n\?\)'), '^Location: ')
   let res = substitute(res, '^.*: ', '', '')
@@ -571,13 +637,11 @@ function! s:GistPostBuffers(user, token, private)
   silent! exec "buffer! ".bn
 
   let file = tempname()
-  exec 'redir! > '.file
-  silent echo squery
-  redir END
+  call writefile([squery], file)
   echo "Posting it to gist... "
   let quote = &shellxquote == '"' ?  "'" : '"'
   let url = 'http://gist.github.com/gists'
-  let res = system('curl -i -d @'.quote.file.quote.' '.url)
+  let res = system('curl -i -d @'.quote.file.quote.' http://gist.github.com/gists')
   call delete(file)
   let res = matchstr(split(res, '\(\r\?\n\|\r\n\?\)'), '^Location: ')
   let res = substitute(res, '^.*: ', '', '')
